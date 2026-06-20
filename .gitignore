@@ -1,0 +1,28 @@
+# Lambda packaging dependencies (not needed in repo)
+bin/
+certifi/
+certifi-*.dist-info/
+charset_normalizer/
+charset_normalizer-*.dist-info/
+idna/
+idna-*.dist-info/
+requests/
+requests-*.dist-info/
+six.py
+six-*.dist-info/
+urllib3/
+urllib3-*.dist-info/
+*.so
+
+# Zip files
+*.zip
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Mac system files
+.DS_Store
