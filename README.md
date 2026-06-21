@@ -1,57 +1,46 @@
 # OpenFDA Drug Safety ETL Pipeline
 
-An end-to-end ETL pipeline that extracts adverse drug event data from the FDA's public OpenFDA API, transforms it into a clean structured format, loads it into AWS S3, and makes it queryable with AWS Athena. The pipeline is deployed as an AWS Lambda function and runs automatically once a day via EventBridge.
+ETL pipeline that pulls adverse drug event reports from the FDA's OpenFDA API, cleans the data, loads it into AWS S3, and makes it queryable with AWS Athena. Deployed as a Lambda function that runs automatically once a day via EventBridge.
 
-## Overview
+## What it does
 
-The OpenFDA Adverse Events API contains 20M+ real-world reports of drug side effects, submitted to the FDA by patients, doctors, and manufacturers. This project builds a pipeline that pulls that data, cleans it, and stores it in a queryable data lake — the same general pattern used in production data engineering for healthcare, pharma, and regulatory analytics.
-
-**Pipeline flow:**
+OpenFDA publishes 20M+ real-world reports of drug side effects submitted by patients, doctors, and manufacturers. This pipeline pulls that data, flattens the messy nested JSON into clean tabular records, and stores it so it can be queried with plain SQL.
 
 ```
-OpenFDA REST API
-      │  (extract)
-      ▼
-  Python / Pandas
-      │  (transform: flatten nested JSON, clean types, decode codes)
-      ▼
-   AWS S3 (raw/)
-      │
-      ▼
-  AWS Athena (SQL queries directly on S3 data)
+OpenFDA API → Python/Pandas (clean + flatten) → S3 → Athena (SQL queries)
 
-Automation: AWS Lambda + EventBridge (runs daily, no manual trigger needed)
+Lambda + EventBridge run the extract/load steps daily, automatically.
 ```
 
 ## Architecture
 
 | Stage | Tool | Purpose |
 |---|---|---|
-| Extract | `requests`, OpenFDA REST API | Pull adverse event reports in JSON |
+| Extract | `requests`, OpenFDA API | Pull adverse event reports as JSON |
 | Transform | Python, Pandas | Flatten nested fields, decode coded values, clean types |
-| Load | `boto3`, AWS S3 | Store cleaned data as CSV in a data lake |
-| Query | AWS Athena | Run SQL directly against S3 data, no database needed |
-| Automate | AWS Lambda | Run the extract/transform/load logic serverlessly |
-| Schedule | AWS EventBridge | Trigger the Lambda function once every 24 hours |
+| Load | `boto3`, AWS S3 | Store cleaned data as CSV |
+| Query | AWS Athena | Run SQL directly against S3 data |
+| Automate | AWS Lambda | Run extract/transform/load without a server |
+| Schedule | AWS EventBridge | Trigger the Lambda function every 24 hours |
 
-## What the data looks like
+## Data
 
-Each raw API record is deeply nested JSON. For example, a single report contains nested `patient`, `reaction[]`, and `drug[]` objects. The transform step flattens this into a clean tabular structure:
+Each raw record from the API is deeply nested — a single report has nested `patient`, `reaction[]`, and `drug[]` objects. The transform step flattens this into:
 
 | Field | Description |
 |---|---|
 | `safetyreportid` | Unique report ID |
-| `receivedate` | Date FDA received the report (parsed to `YYYY-MM-DD`) |
+| `receivedate` | Date FDA received the report |
 | `serious` | Whether the event was classified as medically serious |
 | `seriousnessdeath` | Whether the event resulted in death |
 | `country` | Reporting country |
 | `patient_age` | Patient age at onset |
-| `patient_sex` | Decoded to `Male` / `Female` / `Unknown` |
-| `reactions` | Comma-separated list of reported adverse reactions |
-| `drugs` | Comma-separated list of implicated drugs |
+| `patient_sex` | Decoded to Male / Female / Unknown |
+| `reactions` | Reported adverse reactions |
+| `drugs` | Drugs involved in the report |
 | `drug_indications` | Why the drug was prescribed |
 
-## Example Athena query
+## Example query
 
 ```sql
 SELECT 
@@ -64,27 +53,27 @@ ORDER BY total_reports DESC
 LIMIT 10;
 ```
 
-This returns the most frequently reported drugs in the dataset alongside how many of those reports involved a death — the kind of question this pipeline is built to answer at scale.
+Returns the most frequently reported drugs and how many of those reports involved a death.
 
-## Notable challenges solved
+## Issues I ran into
 
-- **Quoted commas breaking CSV parsing in Athena.** Some fields (e.g. multiple drugs per report) contain commas inside quoted strings. Athena's default CSV reader split on every comma regardless of quoting, corrupting the table. Fixed by switching the Athena table definition to `OpenCSVSerde`, which correctly respects quoted fields.
-- **Invalid/missing numeric values crashing queries.** Empty `patient_age` values (common in real-world reporting data) caused `NumberFormatException` errors when Athena tried to cast them to `DOUBLE`. Fixed by adding `'use.null.for.invalid.data'='true'` to the table properties, so missing values are treated as `NULL` instead of failing the query.
-- **Lambda timeout on cold start.** The default 3-second Lambda timeout was too short to cold-start the pandas layer, call the API, and write to S3. Increased to 30 seconds.
-- **IAM permissions.** The Lambda execution role had no S3 write access by default. Resolved by attaching `AmazonS3FullAccess` to the function's role.
-- **Package size limits.** Bundling `pandas` and `numpy` directly into the Lambda deployment package pushed it close to AWS's 50MB upload limit. Resolved by removing them from the deployment ZIP and attaching AWS's pre-built `AWSSDKPandas` Lambda layer instead — the standard approach for using large libraries in Lambda.
+- **Athena was splitting columns on every comma, even inside quotes.** Some drug fields have multiple drugs separated by commas (e.g. `"DOXYCYCLINE, TRAMADOL"`). The default CSV table definition ignored the quotes and broke the column structure. Fixed by switching to `OpenCSVSerde` in the table definition.
+- **Empty age values crashed the query.** Missing `patient_age` values caused a `NumberFormatException` when Athena tried to cast them to `DOUBLE`. Fixed by adding `'use.null.for.invalid.data'='true'` to the table properties.
+- **Lambda timed out on the default 3-second limit.** Cold-starting the pandas layer plus the API call plus the S3 upload took longer than that. Bumped the timeout to 30 seconds.
+- **Lambda's execution role had no S3 permissions by default.** Had to attach `AmazonS3FullAccess` to the function's IAM role before it could write to the bucket.
+- **Pandas + numpy pushed the deployment ZIP close to Lambda's size limit.** Removed them from the package and used AWS's pre-built `AWSSDKPandas` Lambda layer instead.
 
-## Repository contents
+## Files
 
-- `lambda_function.py` — production script containing the `lambda_handler` entry point AWS Lambda invokes on each scheduled run
-- `openfda_etl_pipeline.ipynb` — exploratory notebook showing the step-by-step build process: API exploration, data cleaning logic, and local testing before deployment
+- `lambda_function.py` — the production script, contains the `lambda_handler` entry point AWS Lambda runs on each scheduled trigger
+- `openfda_etl_pipeline.ipynb` — the notebook where I built and tested the extract/transform logic before deploying it
 
-## Tech stack
+## Stack
 
-Python · Pandas · AWS S3 · AWS Lambda · AWS Athena · AWS EventBridge · AWS IAM · REST APIs
+Python, Pandas, AWS S3, AWS Lambda, AWS Athena, AWS EventBridge, AWS IAM, REST APIs
 
-## Future improvements
+## Possible next steps
 
-- Partition S3 data by date for more efficient Athena queries at larger scale
-- Add a `processed/` layer with pre-aggregated tables for common queries
-- Add CloudWatch alarms for pipeline failure notifications
+- Partition S3 data by date for faster Athena queries at scale
+- Add a `processed/` layer with pre-aggregated tables
+- CloudWatch alarms for pipeline failures
